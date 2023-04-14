@@ -1,0 +1,188 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Runtime.InteropServices;
+
+namespace ChatServer
+{
+    class Program
+    {
+        static readonly object _lock = new();
+        static readonly List<TcpClient> _clients = new();
+        static readonly CancellationTokenSource _cancellationTokenSource = new();
+        static bool exitRequested = false;
+        static void Main()
+        {
+            Console.OutputEncoding = Encoding.UTF8;
+            Console.CancelKeyPress += (sender, eArgs) =>
+            {
+                eArgs.Cancel = true;
+                exitRequested = true;
+                CloseServer();
+            };
+
+            while (!exitRequested && !_cancellationTokenSource.Token.IsCancellationRequested)
+            {
+                IPAddress ip = IPAddress.Parse("192.168.1.161");
+                int port = 12345;
+                TcpListener server = new(ip, port);
+
+                try
+                {
+                    server.Start();
+                    Console.WriteLine($"Servidor iniciado em {ip}:{port}");
+                    Console.WriteLine("Aguardando conexões...");
+
+                    while (!_cancellationTokenSource.Token.IsCancellationRequested)
+                    {
+
+                        TcpClient client = server.AcceptTcpClient();
+                        Console.WriteLine($"Novo cliente conectado: {client.Client.RemoteEndPoint}");
+                        AddClient(client);
+
+                        Thread clientThread = new(() => HandleClient(client));
+                        clientThread.Start();
+                    }
+                }
+                catch (SocketException ex)
+                {
+                    Console.WriteLine($"Exceção de Socket: {ex}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Exceção inesperada: {ex}");
+                }
+                finally
+                {
+                    CloseServer();
+                }
+            }
+        }
+        static void CloseServer()
+        {
+            _cancellationTokenSource.Cancel();
+            Console.WriteLine("Encerrando conexões...");
+
+            foreach (TcpClient client in _clients)
+            {
+                try
+                {
+                    client.GetStream().Dispose();
+                    client.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Erro ao encerrar conexão do cliente {client.Client.RemoteEndPoint}: {ex.Message}");
+                }
+            }
+            Console.WriteLine("Servidor encerrado.");
+        }
+        static void AddClient(TcpClient client)
+        {
+            lock (_lock)
+            {
+                _clients.Add(client);
+            }
+        }
+        static void RemoveClient(TcpClient client)
+        {
+            lock (_lock)
+            {
+                _clients.Remove(client);
+            }
+        }
+        static void HandleClient(TcpClient client)
+        {
+            try
+            {
+                using NetworkStream stream = client.GetStream();
+
+                byte[] buffer = new byte[1024];
+                byte[] usernamePrompt = Encoding.UTF8.GetBytes("Por favor, informe seu nome de usuário: ");
+                stream.Write(usernamePrompt, 0, usernamePrompt.Length);
+
+                int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                string username = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
+                Console.WriteLine($"O cliente {client.Client.RemoteEndPoint} escolheu o nome de usuário '{username}'.");
+                byte[] welcomeMessage = Encoding.UTF8.GetBytes($"Bem-vindo ao chat, {username}!");
+                stream.Write(welcomeMessage, 0, welcomeMessage.Length);
+
+                const int MAX_MESSAGES = 10;
+                List<string> messages = new();
+
+                while (client.Connected)
+                {
+                    bytesRead = stream.Read(buffer, 0, buffer.Length);
+                    string message = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
+
+                    if (message.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    Console.Clear();
+
+                    messages.Add($"{username}: {message}");
+                    if (messages.Count > MAX_MESSAGES)
+                    {
+                        messages.RemoveAt(0);
+                    }
+
+                    Console.SetCursorPosition(0, 0);
+                    Console.WriteLine($"Mensagens recentes:");
+                    foreach (string msg in messages)
+                    {
+                        Console.WriteLine(msg);
+                    }
+
+                    SendMessageToAllClients($"{username}: {message}");
+
+                    buffer = new byte[1024];
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Erro de leitura de mensagem do cliente {client.Client.RemoteEndPoint}: {ex.Message}");
+            }
+            finally
+            {
+                Console.WriteLine($"Cliente {client.Client.RemoteEndPoint} desconectado");
+                RemoveClient(client);
+                client.GetStream().Close();
+                client.Close();
+            }
+        }
+        static void SendMessageToAllClients(string message)
+        {
+            lock (_lock)
+            {
+                foreach (TcpClient client in _clients)
+                {
+                    NetworkStream stream = client.GetStream();
+                    byte[] buffer = Encoding.UTF8.GetBytes(message);
+                    stream.Write(buffer, 0, buffer.Length);
+                }
+            }
+            Console.WriteLine($"Mensagem enviada para todos os clientes: {message}");
+        }
+        static class ClientManager
+        {
+            public static readonly object _lock = new();
+            public static readonly List<TcpClient> Clientes = new();
+            public static void AdicionarCliente(TcpClient cliente)
+            {
+                lock (_lock)
+                {
+                    Clientes.Add(cliente);
+                }
+            }
+            public static void RemoverCliente(TcpClient cliente)
+            {
+                lock (_lock)
+                {
+                    Clientes.Remove(cliente);
+                }
+            }
+        }
+    }
+}
